@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "analyze": "ANALYZE=true next build"
+    "postinstall": "node node_modules/pdfjs-dist/legacy/build/pdf.worker.js"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
@@ -58,7 +58,7 @@
     "or": "^0.2.0",
     "pako": "^2.1.0",
     "pdf-parse": "^1.1.1",
-    "pdfjs-dist": "^4.0.0",
+    "pdfjs-dist": "^3.11.174",
     "react": "^18.2.0",
     "react-day-picker": "8.10.1",
     "react-dom": "^18.2.0",

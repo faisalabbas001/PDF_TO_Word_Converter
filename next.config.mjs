@@ -43,11 +43,21 @@ const nextConfig = {
         fs: false,
         path: false,
         canvas: false,
+        crypto: false,
       }
     }
+    config.module.rules.push({
+      test: /pdf\.worker\.(min\.)?js/,
+      type: 'asset/resource',
+      generator: {
+        filename: 'static/worker/[hash][ext][query]',
+      },
+    })
     config.experiments = {
       ...config.experiments,
       topLevelAwait: true,
+      asyncWebAssembly: true,
+      layers: true,
     }
     return config
   },

@@ -4,7 +4,8 @@ import { useRouter } from "next/navigation"
 import { motion, AnimatePresence } from "framer-motion"
 import Navbar from "../components/Navbar"
 import { Document, Packer, Paragraph, TextRun } from "docx"
-import * as pdfjsLib from 'pdfjs-dist/build/pdf.min.js';
+import dynamic from 'next/dynamic'
+import { loadPdfjs } from '../utils/pdfLoader'
 import pako from 'pako';
 
 const initDB = async () => {
@@ -130,13 +131,9 @@ const PDFConverter = () => {
     setConversionProgress(0)
 
     try {
-      const PDFJS = await import('pdfjs-dist/webpack')
-      
-      // Create a fresh copy for processing
-      const pdfDataCopy = new Uint8Array(pdfData)
-      
+      const PDFJS = await loadPdfjs()
       const pdf = await PDFJS.getDocument({
-        data: pdfDataCopy.buffer,
+        data: pdfData,
         useWorkerFetch: true,
         isEvalSupported: false,
         useSystemFonts: true
@@ -222,7 +219,7 @@ const PDFConverter = () => {
       setConvertedContent(buffer)
       
     } catch (error) {
-      console.error("Error converting PDF:", error)
+      console.error('PDF conversion error:', error)
       setConversionError("Error converting PDF. Please try again.")
     } finally {
       setIsConverting(false)
@@ -297,9 +294,7 @@ const PDFConverter = () => {
       const pdfData = new Uint8Array(decompressedData)
 
       // Load PDF.js
-      const PDFJS = await import('pdfjs-dist/webpack')
-      PDFJS.GlobalWorkerOptions.workerSrc = 
-        `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS.version}/pdf.worker.min.js`
+      const PDFJS = await loadPdfjs()
 
       // Create a fresh copy for the PDF document
       const pdfDataCopy = new Uint8Array(pdfData)
