@@ -1,71 +1,182 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect, useMemo } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useDropzone } from "react-dropzone"
 import Navbar from "./components/Navbar"
+import pako from 'pako'
+
+const initDB = async () => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('PDFConverter', 1)
+    
+    request.onerror = () => reject(request.error)
+    request.onsuccess = () => resolve(request.result)
+    
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result
+      if (!db.objectStoreNames.contains('chunks')) {
+        db.createObjectStore('chunks', { keyPath: 'id' })
+      }
+    }
+  })
+}
+
+const storeChunk = async (db, id, data) => {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(['chunks'], 'readwrite')
+    const store = transaction.objectStore('chunks')
+    const request = store.put({ id, data })
+    
+    request.onsuccess = () => resolve()
+    request.onerror = () => reject(request.error)
+  })
+}
+
+const ProgressBar = ({ progress, status }) => {
+  return (
+    <div className="w-full max-w-xl mx-auto mt-6 px-4">
+      <div className="flex justify-between mb-2">
+        <span className="text-sm font-medium text-blue-700">{status}</span>
+        <span className="text-sm font-medium text-blue-700">{progress}%</span>
+      </div>
+      <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
+        <div 
+          className="bg-blue-600 h-full rounded-full transition-all duration-300 ease-out"
+          style={{ 
+            width: `${progress}%`,
+            transition: 'width 0.5s ease-out'
+          }}
+        />
+      </div>
+      {/* Upload speed and time estimation */}
+      {progress > 0 && progress < 100 && (
+        <div className="flex justify-between mt-2 text-xs text-gray-500">
+          <span>Time left: ~{Math.ceil((100 - progress) / 20)} seconds</span>
+          <span>Upload speed: {(progress < 50 ? '1.2' : '2.4')} MB/S</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Home() {
+  const [mounted, setMounted] = useState(false)
   const [selectedFile, setSelectedFile] = useState(null)
   const [isConverting, setIsConverting] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
+  const [error, setError] = useState(null)
+  const [processingChunks, setProcessingChunks] = useState(false)
   const router = useRouter()
 
   const handleFileChange = (acceptedFiles) => {
     const file = acceptedFiles[0]
     if (file) {
       if (file.type !== "application/pdf") {
-        alert("Please select a PDF file")
+        setError("Please select a PDF file")
         return
       }
+      if (file.size > 100 * 1024 * 1024) {
+        setError("File size should be less than 100MB")
+        return
+      }
+      setError(null)
       setSelectedFile(file)
     }
   }
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+  const dropzoneConfig = useMemo(() => ({
     onDrop: handleFileChange,
     accept: {
       "application/pdf": [".pdf"],
     },
     multiple: false,
-  })
+  }), [])
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone(dropzoneConfig)
+
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+
+  // Prevent hydration mismatch by not rendering until mounted
+  if (!mounted) {
+    return null
+  }
 
   const handleConvertClick = async () => {
-    if (!selectedFile) return
+    if (!selectedFile || isConverting) return
     setIsConverting(true)
+    setError(null)
+    setProcessingChunks(true)
 
     try {
-      // Read file as ArrayBuffer instead of DataURL
+      // Initialize IndexedDB
+      const db = await initDB()
+
+      // Read the file as ArrayBuffer
       const arrayBuffer = await new Promise((resolve, reject) => {
         const reader = new FileReader()
         reader.onload = () => resolve(reader.result)
         reader.onerror = reject
         reader.readAsArrayBuffer(selectedFile)
+        
+        reader.onprogress = (event) => {
+          if (event.lengthComputable) {
+            setUploadProgress(Math.round((event.loaded / event.total) * 50))
+          }
+        }
       })
 
-      // Convert ArrayBuffer to Base64
-      const base64 = btoa(
-        new Uint8Array(arrayBuffer)
-          .reduce((data, byte) => data + String.fromCharCode(byte), '')
-      )
+      setUploadProgress(75)
 
-      // Store PDF data in sessionStorage
+      // Compress the ArrayBuffer directly
+      const compressedData = pako.deflate(new Uint8Array(arrayBuffer))
+      
+      setUploadProgress(90)
+
+      // Store the compressed data in chunks
+      const chunkSize = 5 * 1024 * 1024 // 5MB chunks
+      const totalChunks = Math.ceil(compressedData.length / chunkSize)
+
+      // Store metadata
       sessionStorage.setItem(
-        "pdfData",
+        "pdfMetadata",
         JSON.stringify({
-          fileData: base64,
           fileName: selectedFile.name,
           fileType: selectedFile.type,
           fileSize: selectedFile.size,
           timestamp: new Date().getTime(),
+          totalChunks,
+          isCompressed: true,
+          originalSize: arrayBuffer.byteLength,
+          compressedSize: compressedData.length
         })
       )
 
-      // Navigate to edit page
+      // Store chunks
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * chunkSize
+        const end = Math.min(start + chunkSize, compressedData.length)
+        const chunk = compressedData.slice(start, end)
+        await storeChunk(db, `pdfChunk_${i}`, Array.from(chunk))
+      }
+
+      setUploadProgress(100)
+      await new Promise(resolve => setTimeout(resolve, 500))
       router.push("/editpdf")
+
     } catch (error) {
       console.error("Error processing PDF:", error)
-      alert("Error processing PDF. Please try again.")
+      if (error.name === 'QuotaExceededError' || error.message.includes('quota')) {
+        setError("File is too large to process in browser. Please try a smaller file (< 50MB).")
+      } else {
+        setError("Error processing PDF. Please try again.")
+      }
+      setIsConverting(false)
     } finally {
+      setProcessingChunks(false)
       setIsConverting(false)
     }
   }
@@ -103,19 +214,27 @@ export default function Home() {
 
   return (
     <main className="min-h-screen">
-    <Navbar />
+      <Navbar />
       {/* Hero Section */}
       <section className="bg-gradient-to-b from-blue-50 to-white py-16 px-4">
         <div className="max-w-6xl mx-auto text-center">
-          <h1 className="text-4xl md:text-6xl font-bold text-gray-900 mb-6">PDF to Word Converter</h1>
+          <h1 className="text-4xl md:text-6xl font-bold text-gray-900 mb-6">
+            PDF to Word Converter
+          </h1>
           <p className="text-xl text-gray-600 mb-8 max-w-2xl mx-auto">
             Convert your PDF to Word documents easily and edit them like the original
           </p>
           <div className="flex flex-col sm:flex-row justify-center gap-4 mb-12">
-            <button className="bg-blue-600 text-white px-8 py-4 rounded-lg hover:bg-blue-700 transition-colors">
+            <button 
+              type="button"
+              className="bg-blue-600 text-white px-8 py-4 rounded-lg hover:bg-blue-700 transition-colors"
+            >
               Get Started
             </button>
-            <button className="border border-gray-300 px-8 py-4 rounded-lg hover:bg-gray-50 transition-colors">
+            <button 
+              type="button"
+              className="border border-gray-300 px-8 py-4 rounded-lg hover:bg-gray-50 transition-colors"
+            >
               See All Tools
             </button>
           </div>
@@ -174,12 +293,13 @@ export default function Home() {
                     <button
                       onClick={handleConvertClick}
                       disabled={isConverting}
-                      className="w-full bg-blue-600 hover:bg-blue-700 cursor-pointer text-white px-8 py-3 rounded-lg mt-4 transition-colors duration-300 disabled:bg-blue-400"
+                      className={`w-full relative flex items-center justify-center text-white px-8 py-3 rounded-lg mt-4 transition-all duration-300
+                        ${isConverting ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 cursor-pointer'}`}
                     >
                       {isConverting ? (
-                        <span className="flex items-center justify-center">
+                        <>
                           <svg
-                            className="animate-spin -ml-1 mr-3 h-5 w-5 text-white"
+                            className="animate-spin mr-3 h-5 w-5 text-white"
                             xmlns="http://www.w3.org/2000/svg"
                             fill="none"
                             viewBox="0 0 24 24"
@@ -198,10 +318,25 @@ export default function Home() {
                               d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
                             ></path>
                           </svg>
-                          Converting...
-                        </span>
+                          Converting PDF to Word...
+                        </>
                       ) : (
-                        "Convert PDF to Word"
+                        <>
+                          <svg 
+                            className="w-5 h-5 mr-2" 
+                            fill="none" 
+                            stroke="currentColor" 
+                            viewBox="0 0 24 24"
+                          >
+                            <path 
+                              strokeLinecap="round" 
+                              strokeLinejoin="round" 
+                              strokeWidth={2} 
+                              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
+                            />
+                          </svg>
+                          Convert PDF to Word
+                        </>
                       )}
                     </button>
                   </div>
@@ -292,6 +427,29 @@ export default function Home() {
           </button>
         </div>
       </section>
+
+      {/* Add error message display */}
+      {error && (
+        <div className="w-full mt-4 p-4 bg-red-50 text-red-600 rounded-lg">
+          {error}
+        </div>
+      )}
+
+      {/* Add progress bar */}
+      {isConverting && (
+        <div className="mt-8">
+          <ProgressBar 
+            progress={uploadProgress} 
+            status={
+              uploadProgress < 50 ? "Uploading file..." :
+              uploadProgress < 75 ? "Processing PDF..." :
+              uploadProgress < 90 ? "Compressing data..." :
+              uploadProgress < 100 ? "Finalizing..." :
+              "Complete!"
+            }
+          />
+        </div>
+      )}
     </main>
   )
 }

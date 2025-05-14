@@ -4,8 +4,70 @@ import { useRouter } from "next/navigation"
 import { motion, AnimatePresence } from "framer-motion"
 import Navbar from "../components/Navbar"
 import { Document, Packer, Paragraph, TextRun } from "docx"
+import * as pdfjsLib from 'pdfjs-dist/build/pdf.min.js';
+import pako from 'pako';
+
+const initDB = async () => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('PDFConverter', 1)
+    request.onerror = () => reject(request.error)
+    request.onsuccess = () => resolve(request.result)
+  })
+}
+
+const getChunk = async (db, id) => {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(['chunks'], 'readonly')
+    const store = transaction.objectStore('chunks')
+    const request = store.get(id)
+    
+    request.onsuccess = () => resolve(request.result?.data)
+    request.onerror = () => reject(request.error)
+  })
+}
+
+const deleteChunk = async (db, id) => {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(['chunks'], 'readwrite')
+    const store = transaction.objectStore('chunks')
+    const request = store.delete(id)
+    
+    request.onsuccess = () => resolve()
+    request.onerror = () => reject(request.error)
+  })
+}
+
+const ConversionProgress = ({ progress, status }) => {
+  return (
+    <div className="w-full max-w-xl mx-auto bg-white p-6 rounded-lg shadow-sm">
+      <div className="flex justify-between mb-2">
+        <span className="text-sm font-medium text-blue-700">{status}</span>
+        <span className="text-sm font-medium text-blue-700">{progress}%</span>
+      </div>
+      <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
+        <div 
+          className="bg-blue-600 h-full rounded-full transition-all duration-300 ease-out"
+          style={{ 
+            width: `${progress}%`,
+            transition: 'width 0.5s ease-out'
+          }}
+        />
+      </div>
+      <div className="mt-4 text-center">
+        <p className="text-sm text-gray-600">
+          {progress < 30 ? "Analyzing PDF structure..." :
+           progress < 60 ? "Extracting content..." :
+           progress < 90 ? "Converting to Word format..." :
+           progress < 100 ? "Finalizing document..." :
+           "Conversion complete!"}
+        </p>
+      </div>
+    </div>
+  )
+}
 
 const PDFConverter = () => {
+  const [mounted, setMounted] = useState(false)
   const [documentTitle, setDocumentTitle] = useState("")
   const [showModal, setShowModal] = useState(false)
   const [isFileDeleted, setIsFileDeleted] = useState(false)
@@ -16,6 +78,8 @@ const PDFConverter = () => {
   })
   const [isConverting, setIsConverting] = useState(false)
   const [convertedContent, setConvertedContent] = useState(null)
+  const [conversionProgress, setConversionProgress] = useState(0)
+  const [conversionError, setConversionError] = useState(null)
   const router = useRouter()
 
   // Timer countdown effect
@@ -60,64 +124,72 @@ const PDFConverter = () => {
     sessionStorage.removeItem("pdfData")
   }
 
-  const convertPdfToWord = async (base64Data, fileName) => {
+  const convertPdfToWord = async (pdfData, fileName) => {
     setIsConverting(true)
+    setConversionError(null)
+    setConversionProgress(0)
 
     try {
-      // Convert base64 back to ArrayBuffer
-      const binaryString = atob(base64Data)
-      const bytes = new Uint8Array(binaryString.length)
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i)
-      }
-
-      // Import PDF.js
       const PDFJS = await import('pdfjs-dist/webpack')
-      PDFJS.GlobalWorkerOptions.workerSrc = 
-        `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS.version}/pdf.worker.min.js`
+      
+      // Create a fresh copy for processing
+      const pdfDataCopy = new Uint8Array(pdfData)
+      
+      const pdf = await PDFJS.getDocument({
+        data: pdfDataCopy.buffer,
+        useWorkerFetch: true,
+        isEvalSupported: false,
+        useSystemFonts: true
+      }).promise
 
-      // Load PDF document from ArrayBuffer
-      const loadingTask = PDFJS.getDocument({ data: bytes })
-      const pdf = await loadingTask.promise
-
-      // Array to store all page contents
+      const totalPages = pdf.numPages
       let documentContent = []
 
-      // Extract content from each page
-      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-        const page = await pdf.getPage(pageNum)
+      // Process pages in batches
+      const BATCH_SIZE = 5
+      for (let i = 0; i < totalPages; i += BATCH_SIZE) {
+        const batch = []
+        for (let j = 0; j < BATCH_SIZE && i + j < totalPages; j++) {
+          batch.push(pdf.getPage(i + j + 1))
+        }
+
+        const pages = await Promise.all(batch)
         
-        // Get text content
-        const textContent = await page.getTextContent()
-        
-        // Get page viewport for positioning
-        const viewport = page.getViewport({ scale: 1.0 })
+        for (const page of pages) {
+          const textContent = await page.getTextContent({
+            normalizeWhitespace: true,
+            disableCombineTextItems: false,
+          })
+          
+          const viewport = page.getViewport({ scale: 1.0 })
+          
+          const processedItems = textContent.items
+            .map(item => ({
+              text: item.str,
+              x: item.transform[4],
+              y: viewport.height - item.transform[5],
+              fontSize: Math.abs(item.transform[0]) || 12,
+              fontFamily: item.fontName || 'Arial',
+              bold: item.fontName?.toLowerCase().includes('bold'),
+              italic: item.fontName?.toLowerCase().includes('italic'),
+            }))
+            .sort((a, b) => {
+              const yDiff = Math.abs(a.y - b.y)
+              return yDiff < 5 ? a.x - b.x : b.y - a.y
+            })
 
-        // Process text items with positioning
-        const processedItems = textContent.items.map(item => ({
-          text: item.str,
-          x: item.transform[4], // x position
-          y: viewport.height - item.transform[5], // y position (inverted)
-          fontSize: Math.abs(item.transform[0]) || 12, // font size from transform
-          fontFamily: item.fontName || 'Arial'
-        }))
+          documentContent.push(processedItems)
+        }
 
-        // Sort items by position (top to bottom, left to right)
-        processedItems.sort((a, b) => {
-          const yDiff = Math.abs(a.y - b.y)
-          if (yDiff < 5) return a.x - b.x // Same line
-          return a.y - b.y
-        })
-
-        documentContent.push(processedItems)
+        setConversionProgress(Math.round(((i + BATCH_SIZE) / totalPages) * 100))
+        await new Promise(resolve => setTimeout(resolve, 0))
       }
 
-      // Create Word document
+      // Create Word document with improved formatting
       const doc = new Document({
         sections: [{
           properties: {},
           children: [
-            // Title
             new Paragraph({
               children: [
                 new TextRun({
@@ -128,13 +200,14 @@ const PDFConverter = () => {
               ],
               spacing: { after: 400 },
             }),
-            // Content
             ...documentContent.flat().map(item => 
               new Paragraph({
                 children: [
                   new TextRun({
                     text: item.text,
-                    size: Math.round(item.fontSize * 2), // Convert PDF points to Word points
+                    size: Math.round(item.fontSize * 2),
+                    bold: item.bold,
+                    italic: item.italic,
                     font: item.fontFamily,
                   }),
                 ],
@@ -145,17 +218,15 @@ const PDFConverter = () => {
         }],
       })
 
-      // Generate Word document
       const buffer = await Packer.toBuffer(doc)
-      
-      // Store the buffer directly
       setConvertedContent(buffer)
       
     } catch (error) {
       console.error("Error converting PDF:", error)
-      alert("Error converting PDF. Please try again.")
+      setConversionError("Error converting PDF. Please try again.")
     } finally {
       setIsConverting(false)
+      setConversionProgress(0)
     }
   }
 
@@ -187,28 +258,81 @@ const PDFConverter = () => {
     }
   }
 
-  useEffect(() => {
-    const loadPdfData = async () => {
-      try {
-        const storedData = sessionStorage.getItem("pdfData")
-        if (!storedData) {
-          router.push("/")
-          return
-        }
-
-        const data = JSON.parse(storedData)
-        setDocumentTitle(data.fileName.replace(".pdf", ""))
-        
-        if (data.fileData) {
-          await convertPdfToWord(data.fileData, data.fileName)
-        }
-      } catch (error) {
-        console.error("Error loading PDF data:", error)
+  const loadPdfData = async () => {
+    try {
+      const metadataStr = sessionStorage.getItem("pdfMetadata")
+      if (!metadataStr) {
+        router.push("/")
+        return
       }
-    }
 
+      const metadata = JSON.parse(metadataStr)
+      setDocumentTitle(metadata.fileName.replace(".pdf", ""))
+
+      // Initialize IndexedDB
+      const db = await initDB()
+
+      // Reconstruct the compressed data
+      let compressedArray = new Uint8Array(metadata.compressedSize)
+      let offset = 0
+
+      for (let i = 0; i < metadata.totalChunks; i++) {
+        const chunk = await getChunk(db, `pdfChunk_${i}`)
+        if (!chunk) {
+          throw new Error("File data is incomplete")
+        }
+        compressedArray.set(chunk, offset)
+        offset += chunk.length
+      }
+
+      // Clean up chunks
+      for (let i = 0; i < metadata.totalChunks; i++) {
+        await deleteChunk(db, `pdfChunk_${i}`)
+      }
+
+      // Decompress the data
+      const decompressedData = pako.inflate(compressedArray)
+      
+      // Create a copy of the data for PDF.js
+      const pdfData = new Uint8Array(decompressedData)
+
+      // Load PDF.js
+      const PDFJS = await import('pdfjs-dist/webpack')
+      PDFJS.GlobalWorkerOptions.workerSrc = 
+        `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS.version}/pdf.worker.min.js`
+
+      // Create a fresh copy for the PDF document
+      const pdfDataCopy = new Uint8Array(pdfData)
+      
+      // Load and verify PDF
+      const pdf = await PDFJS.getDocument({
+        data: pdfDataCopy.buffer,
+        useWorkerFetch: true,
+        isEvalSupported: false,
+        useSystemFonts: true
+      }).promise
+
+      // If PDF loads successfully, proceed with conversion using another copy
+      const conversionCopy = new Uint8Array(pdfData)
+      await convertPdfToWord(conversionCopy, metadata.fileName)
+
+      sessionStorage.removeItem("pdfMetadata")
+
+    } catch (error) {
+      console.error("Error loading PDF data:", error)
+      setConversionError("Error loading PDF data. Please try again.")
+    }
+  }
+
+  useEffect(() => {
+    setMounted(true)
     loadPdfData()
-  }, [router])
+  }, [])
+
+  // Prevent hydration mismatch
+  if (!mounted) {
+    return null
+  }
 
   if (isFileDeleted) {
     return (
@@ -377,7 +501,20 @@ const PDFConverter = () => {
           </div>
         </motion.div>
 
-        
+        {/* Show conversion progress */}
+        {isConverting && (
+          <ConversionProgress 
+            progress={conversionProgress}
+            status="Converting PDF to Word"
+          />
+        )}
+
+        {/* Show error if any */}
+        {conversionError && (
+          <div className="mt-6 max-w-xl mx-auto p-4 bg-red-50 border border-red-100 rounded-lg">
+            <p className="text-red-600 text-sm">{conversionError}</p>
+          </div>
+        )}
       </main>
       <footer className="bg-white border-t border-gray-200 mt-auto">
           <div className="max-w-7xl mx-auto py-12 px-4 sm:px-6 lg:px-8">
