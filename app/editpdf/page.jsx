@@ -6,6 +6,7 @@ import Navbar from "../components/Navbar"
 import { Document, Packer, Paragraph, TextRun } from "docx"
 import dynamic from 'next/dynamic'
 import { loadPdfjs } from '../utils/pdfLoader'
+import { getPdfWorkerSrc } from '../utils/pdfWorker'
 import pako from 'pako';
 
 const initDB = async () => {
@@ -132,13 +133,19 @@ const PDFConverter = () => {
 
     try {
       const PDFJS = await loadPdfjs()
-      const pdf = await PDFJS.getDocument({
+      
+      // Set worker source
+      PDFJS.GlobalWorkerOptions.workerSrc = getPdfWorkerSrc()
+
+      const loadingTask = PDFJS.getDocument({
         data: pdfData,
         useWorkerFetch: true,
         isEvalSupported: false,
-        useSystemFonts: true
-      }).promise
+        useSystemFonts: true,
+        standardFontDataUrl: `//cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS.version}/standard_fonts/`,
+      })
 
+      const pdf = await loadingTask.promise
       const totalPages = pdf.numPages
       let documentContent = []
 

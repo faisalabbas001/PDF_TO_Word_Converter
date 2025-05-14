@@ -1,0 +1,6 @@
+export const getPdfWorkerSrc = () => {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  return `//cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`
+} 

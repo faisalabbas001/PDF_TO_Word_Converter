@@ -44,6 +44,10 @@ const nextConfig = {
         path: false,
         canvas: false,
         crypto: false,
+        http: false,
+        https: false,
+        stream: false,
+        zlib: false,
       }
     }
     config.module.rules.push({

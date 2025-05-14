@@ -4,9 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "npm run clean && next build",
     "start": "next start",
     "lint": "next lint",
+    "clean": "rm -rf .next",
     "postinstall": "node node_modules/pdfjs-dist/legacy/build/pdf.worker.js"
   },
   "dependencies": {
@@ -58,7 +59,7 @@
     "or": "^0.2.0",
     "pako": "^2.1.0",
     "pdf-parse": "^1.1.1",
-    "pdfjs-dist": "^3.11.174",
+    "pdfjs-dist": "3.11.174",
     "react": "^18.2.0",
     "react-day-picker": "8.10.1",
     "react-dom": "^18.2.0",
@@ -83,6 +84,9 @@
     "eslint-config-next": "^14.0.0"
   },
   "browser": {
-    "canvas": false
+    "canvas": false,
+    "fs": false,
+    "path": false,
+    "crypto": false
   }
 }
