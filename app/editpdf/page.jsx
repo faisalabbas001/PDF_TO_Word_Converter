@@ -134,7 +134,6 @@ const PDFConverter = () => {
     try {
       const PDFJS = await loadPdfjs()
       
-      // Set worker source
       PDFJS.GlobalWorkerOptions.workerSrc = getPdfWorkerSrc()
 
       const loadingTask = PDFJS.getDocument({
@@ -149,51 +148,60 @@ const PDFConverter = () => {
       const totalPages = pdf.numPages
       let documentContent = []
 
-      // Process pages in batches
-      const BATCH_SIZE = 5
-      for (let i = 0; i < totalPages; i += BATCH_SIZE) {
-        const batch = []
-        for (let j = 0; j < BATCH_SIZE && i + j < totalPages; j++) {
-          batch.push(pdf.getPage(i + j + 1))
-        }
-
-        const pages = await Promise.all(batch)
-        
-        for (const page of pages) {
+      // Process pages
+      for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+        try {
+          const page = await pdf.getPage(pageNum)
+          const viewport = page.getViewport({ scale: 1.0 })
+          
+          // Extract text content
           const textContent = await page.getTextContent({
             normalizeWhitespace: true,
             disableCombineTextItems: false,
           })
-          
-          const viewport = page.getViewport({ scale: 1.0 })
-          
-          const processedItems = textContent.items
-            .map(item => ({
-              text: item.str,
-              x: item.transform[4],
-              y: viewport.height - item.transform[5],
-              fontSize: Math.abs(item.transform[0]) || 12,
-              fontFamily: item.fontName || 'Arial',
-              bold: item.fontName?.toLowerCase().includes('bold'),
-              italic: item.fontName?.toLowerCase().includes('italic'),
-            }))
-            .sort((a, b) => {
-              const yDiff = Math.abs(a.y - b.y)
-              return yDiff < 5 ? a.x - b.x : b.y - a.y
-            })
 
-          documentContent.push(processedItems)
+          // Ensure textContent.items exists and is an array
+          if (textContent && Array.isArray(textContent.items)) {
+            const processedItems = textContent.items
+              .filter(item => item && typeof item.str === 'string') // Filter valid items
+              .map(item => {
+                // Extract transform values safely
+                const transform = item.transform || [0, 0, 0, 0, 0, 0]
+                const [a, b, c, d, x, y] = transform
+
+                return {
+                  text: item.str.trim(),
+                  x: x || 0,
+                  y: viewport.height - (y || 0),
+                  fontSize: Math.abs(a || 12),
+                  fontFamily: item.fontName || 'Arial',
+                  bold: item.fontName?.toLowerCase().includes('bold') || false,
+                  italic: item.fontName?.toLowerCase().includes('italic') || false,
+                }
+              })
+              .filter(item => item.text.length > 0) // Remove empty text
+              .sort((a, b) => {
+                const yDiff = Math.abs(a.y - b.y)
+                const THRESHOLD = 5
+                return yDiff < THRESHOLD ? a.x - b.x : b.y - a.y
+              })
+
+            documentContent.push(processedItems)
+          }
+
+          setConversionProgress(Math.round((pageNum / totalPages) * 100))
+        } catch (pageError) {
+          console.error(`Error processing page ${pageNum}:`, pageError)
+          continue // Continue with next page if one fails
         }
-
-        setConversionProgress(Math.round(((i + BATCH_SIZE) / totalPages) * 100))
-        await new Promise(resolve => setTimeout(resolve, 0))
       }
 
-      // Create Word document with improved formatting
+      // Create Word document with error handling
       const doc = new Document({
         sections: [{
           properties: {},
           children: [
+            // Title
             new Paragraph({
               children: [
                 new TextRun({
@@ -204,20 +212,29 @@ const PDFConverter = () => {
               ],
               spacing: { after: 400 },
             }),
-            ...documentContent.flat().map(item => 
-              new Paragraph({
-                children: [
-                  new TextRun({
-                    text: item.text,
-                    size: Math.round(item.fontSize * 2),
-                    bold: item.bold,
-                    italic: item.italic,
-                    font: item.fontFamily,
-                  }),
-                ],
-                spacing: { after: 200 },
-              })
-            ),
+            
+            // Content
+            ...(documentContent.flat().map(item => {
+              try {
+                return new Paragraph({
+                  children: [
+                    new TextRun({
+                      text: item.text || '',
+                      size: Math.round((item.fontSize || 12) * 2),
+                      bold: item.bold || false,
+                      italic: item.italic || false,
+                      font: item.fontFamily || 'Arial',
+                    }),
+                  ],
+                  spacing: { after: 200 },
+                })
+              } catch (itemError) {
+                console.error('Error creating paragraph:', itemError)
+                return new Paragraph({ 
+                  children: [new TextRun({ text: '' })]
+                })
+              }
+            })).filter(Boolean), // Remove any null/undefined paragraphs
           ],
         }],
       })
@@ -232,6 +249,19 @@ const PDFConverter = () => {
       setIsConverting(false)
       setConversionProgress(0)
     }
+  }
+
+  // Helper functions for improved formatting
+  function getAlignment(x, width) {
+    // Determine text alignment based on position
+    if (x < 100) return 'left'
+    if (x > 400) return 'right'
+    return 'center'
+  }
+
+  function getIndent(x) {
+    // Calculate paragraph indentation
+    return Math.max(0, Math.round(x / 10)) * 100
   }
 
   const handleDownload = () => {
