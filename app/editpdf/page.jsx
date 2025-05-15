@@ -40,28 +40,40 @@ const deleteChunk = async (db, id) => {
 }
 
 const ConversionProgress = ({ progress, status }) => {
+  // Ensure progress is always between 1 and 100
+  const displayProgress = Math.max(1, Math.min(100, Math.round(progress)))
+  
+  // More detailed status messages based on progress
+  const getDetailedStatus = (progress) => {
+    if (progress < 20) return "Initializing PDF document..."
+    if (progress < 40) return "Analyzing document structure..."
+    if (progress < 60) return "Extracting text and formatting..."
+    if (progress < 80) return "Converting to Word format..."
+    if (progress < 95) return "Applying formatting and styles..."
+    if (progress < 100) return "Finalizing document..."
+    return "Conversion complete!"
+  }
+
   return (
     <div className="w-full max-w-xl mx-auto bg-white p-6 rounded-lg shadow-sm">
       <div className="flex justify-between mb-2">
-        <span className="text-sm font-medium text-blue-700">{status}</span>
-        <span className="text-sm font-medium text-blue-700">{progress}%</span>
+        <span className="text-sm font-medium text-blue-700">{getDetailedStatus(displayProgress)}</span>
+        <span className="text-sm font-medium text-blue-700">{displayProgress}%</span>
       </div>
       <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
         <div 
           className="bg-blue-600 h-full rounded-full transition-all duration-300 ease-out"
           style={{ 
-            width: `${progress}%`,
+            width: `${displayProgress}%`,
             transition: 'width 0.5s ease-out'
           }}
         />
       </div>
       <div className="mt-4 text-center">
         <p className="text-sm text-gray-600">
-          {progress < 30 ? "Analyzing PDF structure..." :
-           progress < 60 ? "Extracting content..." :
-           progress < 90 ? "Converting to Word format..." :
-           progress < 100 ? "Finalizing document..." :
-           "Conversion complete!"}
+          {displayProgress < 100 
+            ? "Please wait while we process your document..."
+            : "Your document is ready for download!"}
         </p>
       </div>
     </div>
@@ -129,13 +141,18 @@ const PDFConverter = () => {
   const convertPdfToWord = async (pdfData, fileName) => {
     setIsConverting(true)
     setConversionError(null)
-    setConversionProgress(0)
+    setConversionProgress(1) // Start at 1%
 
     try {
+      // Initialize (1-10%)
+      setConversionProgress(1)
       const PDFJS = await loadPdfjs()
+      setConversionProgress(5)
       
       PDFJS.GlobalWorkerOptions.workerSrc = getPdfWorkerSrc()
+      setConversionProgress(10)
 
+      // Loading PDF (10-20%)
       const loadingTask = PDFJS.getDocument({
         data: pdfData,
         useWorkerFetch: true,
@@ -145,10 +162,15 @@ const PDFConverter = () => {
       })
 
       const pdf = await loadingTask.promise
+      setConversionProgress(20)
+
       const totalPages = pdf.numPages
       let documentContent = []
 
-      // Process pages
+      // Process pages (20-80%)
+      const pageProgressShare = 60 // 60% of progress dedicated to page processing
+      const progressPerPage = pageProgressShare / totalPages
+
       for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
         try {
           const page = await pdf.getPage(pageNum)
@@ -160,12 +182,10 @@ const PDFConverter = () => {
             disableCombineTextItems: false,
           })
 
-          // Ensure textContent.items exists and is an array
           if (textContent && Array.isArray(textContent.items)) {
             const processedItems = textContent.items
-              .filter(item => item && typeof item.str === 'string') // Filter valid items
+              .filter(item => item && typeof item.str === 'string')
               .map(item => {
-                // Extract transform values safely
                 const transform = item.transform || [0, 0, 0, 0, 0, 0]
                 const [a, b, c, d, x, y] = transform
 
@@ -179,7 +199,7 @@ const PDFConverter = () => {
                   italic: item.fontName?.toLowerCase().includes('italic') || false,
                 }
               })
-              .filter(item => item.text.length > 0) // Remove empty text
+              .filter(item => item.text.length > 0)
               .sort((a, b) => {
                 const yDiff = Math.abs(a.y - b.y)
                 const THRESHOLD = 5
@@ -189,19 +209,20 @@ const PDFConverter = () => {
             documentContent.push(processedItems)
           }
 
-          setConversionProgress(Math.round((pageNum / totalPages) * 100))
+          // Update progress for each page
+          setConversionProgress(20 + (pageNum * progressPerPage))
         } catch (pageError) {
           console.error(`Error processing page ${pageNum}:`, pageError)
-          continue // Continue with next page if one fails
+          continue
         }
       }
 
-      // Create Word document with error handling
+      // Creating Word document (80-95%)
+      setConversionProgress(80)
       const doc = new Document({
         sections: [{
           properties: {},
           children: [
-            // Title
             new Paragraph({
               children: [
                 new TextRun({
@@ -212,8 +233,6 @@ const PDFConverter = () => {
               ],
               spacing: { after: 400 },
             }),
-            
-            // Content
             ...(documentContent.flat().map(item => {
               try {
                 return new Paragraph({
@@ -234,20 +253,22 @@ const PDFConverter = () => {
                   children: [new TextRun({ text: '' })]
                 })
               }
-            })).filter(Boolean), // Remove any null/undefined paragraphs
+            })).filter(Boolean),
           ],
         }],
       })
+      setConversionProgress(95)
 
+      // Final processing (95-100%)
       const buffer = await Packer.toBuffer(doc)
       setConvertedContent(buffer)
+      setConversionProgress(100)
       
     } catch (error) {
       console.error('PDF conversion error:', error)
       setConversionError("Error converting PDF. Please try again.")
     } finally {
       setIsConverting(false)
-      setConversionProgress(0)
     }
   }
 

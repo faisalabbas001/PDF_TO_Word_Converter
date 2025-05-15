@@ -70,6 +70,34 @@ export default function Home() {
   const [processingChunks, setProcessingChunks] = useState(false)
   const router = useRouter()
 
+  // Move all useEffect hooks to the top level
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+
+  // Add the conversion timeout effect
+  useEffect(() => {
+    let timeoutId
+
+    if (isConverting) {
+      // Disable the button completely after first click
+      const button = document.querySelector('button[disabled]')
+      if (button) {
+        button.style.pointerEvents = 'none'
+      }
+
+      // Set a maximum loading time
+      timeoutId = setTimeout(() => {
+        setIsConverting(false)
+        setError("Conversion is taking longer than expected. Please try again.")
+      }, 30000) // 30 seconds timeout
+    }
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId)
+    }
+  }, [isConverting])
+
   const handleFileChange = (acceptedFiles) => {
     const file = acceptedFiles[0]
     if (file) {
@@ -86,6 +114,84 @@ export default function Home() {
     }
   }
 
+  const handleConvertClick = async () => {
+    if (!selectedFile || isConverting) return
+    
+    setIsConverting(true)
+    setError(null)
+    
+    try {
+      // Add a minimum loading time to prevent quick flashes
+      const minLoadingTime = new Promise(resolve => setTimeout(resolve, 1500))
+      
+      // Your existing conversion logic
+      const conversionPromise = (async () => {
+        const db = await initDB()
+        // Read the file as ArrayBuffer
+        const arrayBuffer = await new Promise((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () => resolve(reader.result)
+          reader.onerror = reject
+          reader.readAsArrayBuffer(selectedFile)
+          
+          reader.onprogress = (event) => {
+            if (event.lengthComputable) {
+              setUploadProgress(Math.round((event.loaded / event.total) * 50))
+            }
+          }
+        })
+
+        setUploadProgress(75)
+
+        // Compress the ArrayBuffer directly
+        const compressedData = pako.deflate(new Uint8Array(arrayBuffer))
+        
+        setUploadProgress(90)
+
+        // Store the compressed data in chunks
+        const chunkSize = 5 * 1024 * 1024 // 5MB chunks
+        const totalChunks = Math.ceil(compressedData.length / chunkSize)
+
+        // Store metadata
+        sessionStorage.setItem(
+          "pdfMetadata",
+          JSON.stringify({
+            fileName: selectedFile.name,
+            fileType: selectedFile.type,
+            fileSize: selectedFile.size,
+            timestamp: new Date().getTime(),
+            totalChunks,
+            isCompressed: true,
+            originalSize: arrayBuffer.byteLength,
+            compressedSize: compressedData.length
+          })
+        )
+
+        // Store chunks
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * chunkSize
+          const end = Math.min(start + chunkSize, compressedData.length)
+          const chunk = compressedData.slice(start, end)
+          await storeChunk(db, `pdfChunk_${i}`, Array.from(chunk))
+        }
+
+        setUploadProgress(100)
+      })()
+
+      // Wait for both minimum time and conversion
+      await Promise.all([minLoadingTime, conversionPromise])
+      
+      // Add a small delay before navigation for smooth transition
+      await new Promise(resolve => setTimeout(resolve, 500))
+      router.push("/editpdf")
+
+    } catch (error) {
+      console.error("Error processing PDF:", error)
+      setError(error.message || "Error processing PDF. Please try again.")
+      setIsConverting(false)
+    }
+  }
+
   const dropzoneConfig = useMemo(() => ({
     onDrop: handleFileChange,
     accept: {
@@ -96,89 +202,9 @@ export default function Home() {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone(dropzoneConfig)
 
-  useEffect(() => {
-    setMounted(true)
-  }, [])
-
-  // Prevent hydration mismatch by not rendering until mounted
+  // Prevent hydration mismatch
   if (!mounted) {
     return null
-  }
-
-  const handleConvertClick = async () => {
-    if (!selectedFile || isConverting) return
-    setIsConverting(true)
-    setError(null)
-    setProcessingChunks(true)
-
-    try {
-      // Initialize IndexedDB
-      const db = await initDB()
-
-      // Read the file as ArrayBuffer
-      const arrayBuffer = await new Promise((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = () => resolve(reader.result)
-        reader.onerror = reject
-        reader.readAsArrayBuffer(selectedFile)
-        
-        reader.onprogress = (event) => {
-          if (event.lengthComputable) {
-            setUploadProgress(Math.round((event.loaded / event.total) * 50))
-          }
-        }
-      })
-
-      setUploadProgress(75)
-
-      // Compress the ArrayBuffer directly
-      const compressedData = pako.deflate(new Uint8Array(arrayBuffer))
-      
-      setUploadProgress(90)
-
-      // Store the compressed data in chunks
-      const chunkSize = 5 * 1024 * 1024 // 5MB chunks
-      const totalChunks = Math.ceil(compressedData.length / chunkSize)
-
-      // Store metadata
-      sessionStorage.setItem(
-        "pdfMetadata",
-        JSON.stringify({
-          fileName: selectedFile.name,
-          fileType: selectedFile.type,
-          fileSize: selectedFile.size,
-          timestamp: new Date().getTime(),
-          totalChunks,
-          isCompressed: true,
-          originalSize: arrayBuffer.byteLength,
-          compressedSize: compressedData.length
-        })
-      )
-
-      // Store chunks
-      for (let i = 0; i < totalChunks; i++) {
-        const start = i * chunkSize
-        const end = Math.min(start + chunkSize, compressedData.length)
-        const chunk = compressedData.slice(start, end)
-        await storeChunk(db, `pdfChunk_${i}`, Array.from(chunk))
-      }
-
-      setUploadProgress(100)
-      await new Promise(resolve => setTimeout(resolve, 500))
-      router.push("/editpdf")
-
-    } catch (error) {
-      console.error("Error processing PDF:", error)
-      if (error.name === 'QuotaExceededError' || error.message.includes('quota')) {
-        setError("File is too large to process in browser. Please try a smaller file (< 50MB).")
-      } else {
-        setError("Error processing PDF. Please try again.")
-      }
-      setIsConverting(false)
-    } finally {
-      setProcessingChunks(false)
-      setIsConverting(false)
-    }
   }
 
   const commonTools = [
@@ -290,40 +316,34 @@ export default function Home() {
                         Selected: <span className="font-medium">{selectedFile.name}</span>
                       </p>
                     </div>
+                    
+                    {/* Enhanced Convert Button with Better Loading State */}
                     <button
                       onClick={handleConvertClick}
                       disabled={isConverting}
-                      className={`w-full relative flex items-center justify-center text-white px-8 py-3 rounded-lg mt-4 transition-all duration-300
-                        ${isConverting ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 cursor-pointer'}`}
+                      className={`w-full relative flex items-center justify-center text-white px-8 py-4 rounded-lg mt-4 transition-all duration-300
+                        ${isConverting 
+                          ? 'bg-blue-400 cursor-not-allowed' 
+                          : 'bg-blue-600 hover:bg-blue-700 cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]'
+                        }`}
                     >
                       {isConverting ? (
-                        <>
-                          <svg
-                            className="animate-spin mr-3 h-5 w-5 text-white"
-                            xmlns="http://www.w3.org/2000/svg"
-                            fill="none"
-                            viewBox="0 0 24 24"
-                          >
-                            <circle
-                              className="opacity-25"
-                              cx="12"
-                              cy="12"
-                              r="10"
-                              stroke="currentColor"
-                              strokeWidth="4"
-                            ></circle>
-                            <path
-                              className="opacity-75"
-                              fill="currentColor"
-                              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                            ></path>
-                          </svg>
-                          Converting PDF to Word...
-                        </>
+                        <div className="flex items-center justify-center space-x-3">
+                          <div className="relative">
+                            {/* Outer spinning circle */}
+                            <div className="w-6 h-6 border-3 border-blue-200 border-t-blue-100 rounded-full animate-spin"></div>
+                            {/* Inner pulsing circle */}
+                            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-2 h-2 bg-white rounded-full animate-pulse"></div>
+                          </div>
+                          <div className="flex flex-col items-start">
+                            <span className="text-sm font-medium">Converting PDF to Word</span>
+                            <span className="text-xs opacity-75">Please don't close this window...</span>
+                          </div>
+                        </div>
                       ) : (
-                        <>
+                        <div className="flex items-center justify-center space-x-2 group">
                           <svg 
-                            className="w-5 h-5 mr-2" 
+                            className="w-5 h-5 transform group-hover:rotate-6 transition-transform" 
                             fill="none" 
                             stroke="currentColor" 
                             viewBox="0 0 24 24"
@@ -335,10 +355,29 @@ export default function Home() {
                               d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
                             />
                           </svg>
-                          Convert PDF to Word
-                        </>
+                          <span>Convert PDF to Word</span>
+                        </div>
                       )}
                     </button>
+
+                    {/* Processing Status Message */}
+                    {isConverting && (
+                      <div className="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-100">
+                        <div className="flex items-start space-x-3">
+                          <div className="flex-shrink-0 mt-1">
+                            <svg className="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                          </div>
+                          <div>
+                            <p className="text-sm text-blue-700 font-medium">Processing your document</p>
+                            <p className="text-xs text-blue-600 mt-1">
+                              This may take a few moments depending on the file size
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
