@@ -4,11 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "npm run clean && next build",
+    "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "clean": "rm -rf .next",
-    "postinstall": "node node_modules/pdfjs-dist/legacy/build/pdf.worker.js"
+    "clean": "rimraf .next"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
@@ -81,7 +80,8 @@
     "tailwindcss": "^3.0.0",
     "typescript": "^5.0.0",
     "eslint": "^8.0.0",
-    "eslint-config-next": "^14.0.0"
+    "eslint-config-next": "^14.0.0",
+    "rimraf": "^5.0.1"
   },
   "browser": {
     "canvas": false,

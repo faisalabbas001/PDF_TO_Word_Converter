@@ -39,10 +39,9 @@ const nextConfig = {
   webpack: (config, { isServer }) => {
     if (!isServer) {
       config.resolve.fallback = {
-        ...config.resolve.fallback,
-        canvas: false,
         fs: false,
         path: false,
+        canvas: false,
         crypto: false,
         http: false,
         https: false,
@@ -50,6 +49,8 @@ const nextConfig = {
         zlib: false,
       }
     }
+    
+    // PDF.js worker configuration
     config.module.rules.push({
       test: /pdf\.worker\.(min\.)?js/,
       type: 'asset/resource',
@@ -57,21 +58,12 @@ const nextConfig = {
         filename: 'static/worker/[hash][ext][query]',
       },
     })
-    config.experiments = {
-      ...config.experiments,
-      topLevelAwait: true,
-      asyncWebAssembly: true,
-      layers: true,
-    }
+
     return config
   },
   experimental: {
-    outputFileTracingExcludes: {
-      '*': [
-        'node_modules/canvas/**/*',
-        'node_modules/pdfjs-dist/**/*.map',
-      ],
-    },
+    serverActions: true,
+    serverComponentsExternalPackages: ['pdfjs-dist'],
   },
 }
 
