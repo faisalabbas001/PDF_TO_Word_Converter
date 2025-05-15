@@ -40,9 +40,9 @@ const nextConfig = {
     if (!isServer) {
       config.resolve.fallback = {
         ...config.resolve.fallback,
+        canvas: false,
         fs: false,
         path: false,
-        canvas: false,
         crypto: false,
         http: false,
         https: false,
@@ -65,6 +65,31 @@ const nextConfig = {
     }
     return config
   },
+  experimental: {
+    outputFileTracingExcludes: {
+      '*': [
+        'node_modules/canvas/**/*',
+        'node_modules/pdfjs-dist/**/*.map',
+      ],
+    },
+  },
 }
 
 export default nextConfig
+
+export const loadPdfjs = async () => {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  
+  const PDFJS = await import('pdfjs-dist/legacy/build/pdf')
+  return PDFJS
+}
+
+export const getPdfWorkerSrc = () => {
+  if (typeof window === 'undefined') {
+    return ''
+  }
+  
+  return `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${process.env.NEXT_PUBLIC_PDFJS_VERSION}/pdf.worker.min.js`
+}
